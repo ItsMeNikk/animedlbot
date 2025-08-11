@@ -1,0 +1,9 @@
+python-telegram-bot[rate limiter,job-queue]
+httpx
+pydantic
+python-dotenv
+fuzzywuzzy
+python-Levenshtein
+pandas
+lxml
+aria2p
