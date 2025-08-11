@@ -1,7 +1,11 @@
 from __future__ import annotations
 import logging
 import os
+import traceback
+import html
+import json
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
 
 import httpx
@@ -35,11 +39,14 @@ def build_application() -> Application:
         raise RuntimeError("BOT_TOKEN missing in environment")
 
     logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "ERROR"),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        level=os.getenv("LOG_LEVEL", "INFO"),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    for name in ("httpx", "telegram", "telegram.ext", "apscheduler"):
-        logging.getLogger(name).setLevel(logging.ERROR)
+    # Set higher logging level for third-party libraries
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    
+    logger = logging.getLogger(__name__)
 
     builder = ApplicationBuilder().token(bot_token)
     try:
@@ -69,7 +76,7 @@ def build_application() -> Application:
 `4\\.` Filter by quality and audio type
 `5\\.` Get your magnet link\\!
 
-Just type an anime title to get started ?
+Just type an anime title to get started 📥
         """
         await update.message.reply_text(welcome_text, parse_mode="MarkdownV2")
     
@@ -85,16 +92,30 @@ Just type an anime title to get started ?
 
     # --- NEW, MORE ROBUST ERROR HANDLER ---
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Log the error and send a message to the user if possible."""
+        """Log the error and send a detailed message to the developer."""
         
-        # First, log the error to your console
-        logging.error("Exception while handling an update:", exc_info=context.error)
+        logger.error("Exception while handling an update:", exc_info=context.error)
+
+        # Extract traceback
+        tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+        tb_string = "".join(tb_list)
+
+        # Format update for logging
+        update_str = update.to_dict() if isinstance(update, Update) else str(update)
         
-        # Check if the error is associated with a specific update/user
+        message = (
+            f"An exception was raised while handling an update\n"
+            f"<pre>update = {html.escape(json.dumps(update_str, indent=2, ensure_ascii=False))}"
+            "</pre>\n\n"
+            f"<pre>context.chat_data = {html.escape(str(context.chat_data))}</pre>\n\n"
+            f"<pre>context.user_data = {html.escape(str(context.user_data))}</pre>\n\n"
+            f"<pre>{html.escape(tb_string)}</pre>"
+        )
+
+        # Try to notify the user
         if isinstance(update, Update) and update.effective_message:
-            # If so, we can try to notify the user
             await update.effective_message.reply_text(
-                "? *Oops\\! Something went wrong\\.*\n\nPlease try again\\.",
+                "❗️ *Oops\\! Something went wrong\\.*\n\nPlease try your request again\\.",
                 parse_mode="MarkdownV2"
             )
 
@@ -104,7 +125,7 @@ Just type an anime title to get started ?
 
 def main() -> None:
     app = build_application()
-    app.run_polling(allowed_updates=["message", "callback_query"])
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
