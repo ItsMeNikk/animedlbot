@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import os
 import logging
+import html
 from pathlib import Path
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -31,7 +32,8 @@ async def on_download_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         await q.edit_message_text("❗️ Failed to send download to aria2c. Is the daemon running?")
         return
     
-    status_msg = await q.edit_message_text(f"📥 Download added to queue: *{download.name}*", parse_mode="Markdown")
+    initial_text = f"✅ **Download queued:**\n<code>{html.escape(torrent.title)}</code>"
+    status_msg = await q.edit_message_text(initial_text, parse_mode="HTML")
     
     job_context = {
         "chat_id": update.effective_chat.id,
@@ -55,35 +57,33 @@ async def _monitor_download(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.edit_message_text("❓ Download not found in aria2c queue.", chat_id=chat_id, message_id=message_id)
         return
 
-    # --- If download is NOT complete, update status and reschedule ---
+    # --- If download is NOT complete, show detailed stats and reschedule ---
     if not download.is_complete:
-        progress = download.progress_string
-        eta = download.eta  # Using the safe property from services/aria.py
+        name_escaped = html.escape(torrent_name)
         status_text = (
-            f"⏳ Downloading *{torrent_name}*...\n\n"
-            f"`{progress}`\n"
-            f"`ETA: {eta}`"
+            f"⏳ <b>Downloading:</b> <code>{name_escaped}</code>\n\n"
+            f"├─ <b>Progress:</b> <code>{download.progress_string}</code>\n"
+            f"├─ <b>Speed:</b> <code>{download.download_speed}</code>\n"
+            f"├─ <b>Peers:</b> <code>{download.num_seeders} seeders</code>\n"
+            f"└─ <b>ETA:</b> <code>{download.eta}</code>"
         )
         try:
-            await context.bot.edit_message_text(status_text, chat_id=chat_id, message_id=message_id, parse_mode="Markdown")
+            await context.bot.edit_message_text(status_text, chat_id=chat_id, message_id=message_id, parse_mode="HTML")
         except Exception as e:
-            # Ignore "Message is not modified" error, log others
             if "Message is not modified" not in str(e):
                 logging.warning(f"Error updating status for GID {gid}: {e}")
         
-        # Reschedule the monitor job
-        context.job_queue.run_once(_monitor_download, 10, data=job_context, name=f"monitor_{gid}")
+        context.job_queue.run_once(_monitor_download, 5, data=job_context, name=f"monitor_{gid}")
         return
 
     # --- If download IS complete, proceed with upload ---
     await context.bot.edit_message_text(
-        f"✅ Download of *{torrent_name}* complete! Finalizing...",
-        chat_id=chat_id, message_id=message_id, parse_mode="Markdown"
+        f"✅ <b>Download complete!</b>\n<code>{html.escape(torrent_name)}</code>\n\nFinalizing files, please wait...",
+        chat_id=chat_id, message_id=message_id, parse_mode="HTML"
     )
-    # IMPORTANT: Wait a few seconds to prevent a race condition with the filesystem
-    await asyncio.sleep(5)
+    await asyncio.sleep(5) # Wait for filesystem
     
-    download.update() # Refresh file list after waiting
+    download.update()
 
     files_to_upload = sorted(
         [f for f in download.files if Path(f.path).suffix.lower() in VIDEO_EXTENSIONS and Path(f.path).exists() and Path(f.path).stat().st_size > 0],
@@ -91,28 +91,47 @@ async def _monitor_download(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     if not files_to_upload:
-        await context.bot.send_message(chat_id, "❗️ No video files (.mkv, .mp4) were found in the completed download. It might have been a folder or contained other file types.")
+        await context.bot.send_message(chat_id, "❗️ No video files (.mkv, .mp4) were found in the completed download.")
         download.remove(clean=True)
         return
 
-    # --- Uploading Logic ---
+    # Delete the main status message as we will now send per-file updates
+    await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+
+    # --- Per-File Uploading Logic ---
     for i, file in enumerate(files_to_upload):
         file_path = Path(file.path)
-        if not file_path.exists():
-            await context.bot.send_message(chat_id, f"❗️ An error occurred: Final file path not found for `{file_path.name}`.", parse_mode="Markdown")
-            continue
+        
+        # Omit check `if not file_path.exists():` because it is already in list comprehension
         
         if file.length > TELEGRAM_FILE_LIMIT_BYTES:
-            await context.bot.send_message(chat_id, f"⚠️ Skipping `{file_path.name}` because it exceeds Telegram's 2 GB limit.", parse_mode="Markdown")
+            await context.bot.send_message(chat_id, f"⚠️ **Skipping file:** `{file_path.name}`\nReason: Exceeds Telegram's 2 GB limit.", parse_mode="Markdown")
             continue
 
-        await context.bot.send_message(chat_id, f"📤 Uploading file {i+1}/{len(files_to_upload)}: `{file_path.name}`", parse_mode="Markdown")
-        
+        size_mb = file.length / 1024**2
+        upload_msg = await context.bot.send_message(
+            chat_id,
+            f"📤 <b>Uploading file {i+1}/{len(files_to_upload)}:</b>\n"
+            f"<code>{html.escape(file_path.name)}</code>\n"
+            f"<b>Size:</b> {size_mb:.2f} MB",
+            parse_mode="HTML"
+        )
+
         try:
             with open(file_path, 'rb') as f:
-                await context.bot.send_document(chat_id, document=f, filename=file_path.name, read_timeout=60, write_timeout=60)
+                await context.bot.send_document(
+                    chat_id, document=f, filename=file_path.name,
+                    read_timeout=120, write_timeout=120, connect_timeout=30
+                )
+            await upload_msg.delete() # Remove the "Uploading..." message
         except Exception as e:
-            await context.bot.send_message(chat_id, f"❗️ Failed to upload `{file_path.name}`. Error: {e}", parse_mode="Markdown")
+            error_text = html.escape(str(e))
+            await upload_msg.edit_text(
+                f"❗️ <b>Failed to upload:</b>\n<code>{html.escape(file_path.name)}</code>\n"
+                f"<b>Error:</b> <code>{error_text}</code>",
+                parse_mode="HTML"
+            )
+            logging.error(f"Failed to upload {file_path.name}: {e}")
 
     # --- Cleanup Logic ---
     cleanup_msg = await context.bot.send_message(chat_id, "🧹 Cleaning up downloaded files from the server...")
