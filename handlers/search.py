@@ -97,13 +97,35 @@ async def on_title_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     name = escape_html(details.title.english or details.title.romaji or details.title.native or str(details.id))
-    desc = sanitize_description(details.description)
     genres = ", ".join(details.genres or [])
+
+    # --- Start of Caption Truncation Fix ---
     
+    # First, build the text content without the long description
+    base_info_lines = [
+        f"🎬 <b>{name}</b>",
+        f"🗂️ Format: {escape_html(details.format or 'N/A')} | 📺 Status: {escape_html(details.status or 'N/A')}",
+        f"🎞️ Episodes: {details.episodes or 'N/A'} | ⏱️ Duration: {details.duration or 'N/A')} min",
+        f"📅 Season: {escape_html(details.season or 'N/A')} {details.seasonYear or ''}",
+        f"⭐ Score: {details.averageScore or details.meanScore or 'N/A'}",
+        f"🏷️ Genres: {escape_html(genres)}" if genres else "",
+        # The site URL will be the last line
+        f"🔗 More: {escape_html(details.siteUrl)}" if details.siteUrl else "",
+    ]
+    base_text = "\n".join(filter(None, base_info_lines))
+
+    # Calculate the remaining space for the description (Telegram's limit is 1024)
+    # We subtract 20 characters as a safe buffer for the "📝 " prefix and other formatting.
+    remaining_space = 1024 - len(base_text) - 20
+    
+    # Sanitize the description to fit the dynamically calculated remaining space
+    desc = sanitize_description(details.description, max_len=max(0, remaining_space))
+
+    # Now, construct the final list of lines with the properly sized description
     info_lines = [
         f"🎬 <b>{name}</b>",
         f"🗂️ Format: {escape_html(details.format or 'N/A')} | 📺 Status: {escape_html(details.status or 'N/A')}",
-        f"🎞️ Episodes: {details.episodes or 'N/A'} | ⏱️ Duration: {details.duration or 'N/A'} min",
+        f"🎞️ Episodes: {details.episodes or 'N/A'} | ⏱️ Duration: {details.duration or 'N/A')} min",
         f"📅 Season: {escape_html(details.season or 'N/A')} {details.seasonYear or ''}",
         f"⭐ Score: {details.averageScore or details.meanScore or 'N/A'}",
         f"🏷️ Genres: {escape_html(genres)}" if genres else "",
@@ -111,6 +133,8 @@ async def on_title_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"🔗 More: {escape_html(details.siteUrl)}" if details.siteUrl else "",
     ]
     text = "\n".join(filter(None, info_lines))
+
+    # --- End of Caption Truncation Fix ---
 
     cover = details.coverImage.large if details.coverImage else None
     
